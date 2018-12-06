@@ -34,70 +34,42 @@ using namespace std;
 
 namespace {
 
-#define CL_DEVICE_AUTO 1024 // More than maximum in the bitmask
-
-map<const string, cl_device_type> device_map = {
-        {"auto", CL_DEVICE_AUTO},
-        {"gpu", CL_DEVICE_TYPE_GPU},
-        {"accelerator", CL_DEVICE_TYPE_ACCELERATOR},
-        {"default", CL_DEVICE_TYPE_DEFAULT},
-        {"cpu", CL_DEVICE_TYPE_CPU}
-};
-
-// Get the OpenCL device (search order: GPU, ACCELERATOR, DEFAULT, and CPU)
-cl::Device getDevice(const cl::Platform &platform, const string &default_device_type, const int &device_number,
-                     const bool &verbose) {
-    vector<cl::Device> device_list;
-    vector<cl::Device> valid_device_list;
-    platform.getDevices(CL_DEVICE_TYPE_ALL, &device_list);
-
-    if (device_list.empty()) {
-        throw runtime_error("No OpenCL device found");
-    }
-
-    if (!util::exist(device_map, default_device_type)) {
-        stringstream ss;
-        ss << "'" << default_device_type << "' is not a OpenCL device type. "
-           << "Must be one of 'auto', 'gpu', 'accelerator', 'cpu', or 'default'";
-        throw runtime_error(ss.str());
-    } else if (device_map[default_device_type] != CL_DEVICE_AUTO) {
-        for (auto &device: device_list) {
-            if ((device.getInfo<CL_DEVICE_TYPE>() & device_map[default_device_type]) ==
-                device_map[default_device_type]) {
-                valid_device_list.push_back(device);
-            }
-        }
-
-        try {
-            return valid_device_list.at(device_number);
-        } catch (std::out_of_range &err) {
-            stringstream ss;
-            ss << "Could not find selected OpenCL device type ('" << default_device_type << "') on default platform";
-            throw runtime_error(ss.str());
+vector<pair<cl::Platform, cl::Device> > get_device_list() {
+    // Find all devices
+    vector<pair<cl::Platform, cl::Device> > all_device_list;
+    vector<cl::Platform> platform_list;
+    cl::Platform::get(&platform_list);
+    for (const cl::Platform &platform : platform_list) {
+        vector<cl::Device> device_list;
+        platform.getDevices(CL_DEVICE_TYPE_ALL, &device_list);
+        for (const cl::Device &device: device_list) {
+            all_device_list.emplace_back(make_pair(platform, device));
         }
     }
 
-    // Type was 'auto'
-    for (auto &device_type: device_map) {
-        for (auto &device: device_list) {
-            if ((device.getInfo<CL_DEVICE_TYPE>() & device_type.second) == device_type.second) {
-                if (device.getInfo<CL_DEVICE_TYPE>() == CL_DEVICE_TYPE_CPU &&
-                    platform.getInfo<CL_PLATFORM_NAME>() == "Apple") {
-                    if (verbose) {
-                        cout << "Apple platform / CPU device combination ignored for CL_DEVICE_TYPE 'auto'" << endl;
-                    }
-                } else {
-                    valid_device_list.push_back(device);
-                }
+    // Sort devices by type
+    vector<pair<cl::Platform, cl::Device> > ret;
+    for (cl_device_type type: {CL_DEVICE_TYPE_GPU, CL_DEVICE_TYPE_ACCELERATOR, CL_DEVICE_TYPE_CPU}) {
+        for (const pair<cl::Platform, cl::Device> &device: all_device_list) {
+            if (device.second.getInfo<CL_DEVICE_TYPE>() & type) {
+                ret.emplace_back(device);
             }
         }
     }
+    return ret;
+}
 
-    try {
-        return valid_device_list.at(device_number);
-    } catch (std::out_of_range &err) {
-        throw runtime_error("No OpenCL device of usable type found");
+ostream &operator<<(ostream &out, const pair<cl::Platform, cl::Device> &device) {
+    out << device.first.getInfo<CL_PLATFORM_NAME>() << " / " << device.second.getInfo<CL_DEVICE_NAME>()
+        << " (" << device.second.getInfo<CL_DEVICE_OPENCL_C_VERSION>() << ")";
+    return out;
+}
+
+ostream &operator<<(ostream &out, vector<pair<cl::Platform, cl::Device> > &device_list) {
+    for (const pair<cl::Platform, cl::Device> &device: device_list) {
+        out << device << "\n";
     }
+    return out;
 }
 }
 
@@ -111,50 +83,18 @@ EngineOpenCL::EngineOpenCL(component::ComponentVE &comp, jitk::Statistics &stat)
         work_group_size_3dx(comp.config.defaultGet<cl_ulong>("work_group_size_3dx", 32)),
         work_group_size_3dy(comp.config.defaultGet<cl_ulong>("work_group_size_3dy", 2)),
         work_group_size_3dz(comp.config.defaultGet<cl_ulong>("work_group_size_3dz", 2)) {
-    vector<cl::Platform> platforms;
-    cl::Platform::get(&platforms);
-    if (platforms.empty()) {
-        throw runtime_error("No OpenCL platforms found");
-    }
 
-    bool found = false;
-    if (platform_no == -1) {
-        for (auto pform : platforms) {
-            // Pick first valid platform
-            try {
-                // Get the device of the platform
-                platform = pform;
-                device = getDevice(platform, default_device_type, default_device_number, verbose);
-                found = true;
-            } catch (const cl::Error &err) {
-                // We try next platform
-            }
-        }
-    } else {
-        if (platform_no > ((int) platforms.size() - 1)) {
-            std::stringstream ss;
-            ss << "No such OpenCL platform. Tried to fetch #";
-            ss << platform_no << " out of ";
-            ss << platforms.size() - 1 << "." << endl;
-            throw std::runtime_error(ss.str());
-        }
-
-        platform = platforms[platform_no];
-        device = getDevice(platform, default_device_type, default_device_number, verbose);
-        found = true;
+    vector<pair<cl::Platform, cl::Device> > device_list = get_device_list();
+    try {
+        device = device_list.at(device_number).second;
+    } catch (std::out_of_range &err) {
+        stringstream ss;
+        ss << "OpenCL `device_number` is out of range. The available devices: \n" << device_list;
+        throw runtime_error(ss.str());
     }
 
     if (verbose) {
-        cout << "Using platform: " << platform.getInfo<CL_PLATFORM_NAME>() << endl;
-    }
-
-    if (!found) {
-        throw runtime_error("Invalid OpenCL device/platform");
-    }
-
-    if (verbose) {
-        cout << "Using device: " << device.getInfo<CL_DEVICE_NAME>() \
- << " (" << device.getInfo<CL_DEVICE_OPENCL_C_VERSION>() << ")" << endl;
+        cout << "Using " << device_list.at(device_number) << "\n";
     }
 
     context = cl::Context(device);
@@ -165,10 +105,7 @@ EngineOpenCL::EngineOpenCL(component::ComponentVE &comp, jitk::Statistics &stat)
 
     // Write the compilation hash
     stringstream ss;
-    ss << compile_flg
-       << platform.getInfo<CL_PLATFORM_NAME>()
-       << device.getInfo<CL_DEVICE_NAME>()
-       << device.getInfo<CL_DEVICE_OPENCL_C_VERSION>();
+    ss << compile_flg << device_list.at(device_number);
     compilation_hash = util::hash(ss.str());
 
     // Initiate cache limits
@@ -567,17 +504,17 @@ void EngineOpenCL::loopHeadWriter(const jitk::SymbolTable &symbols,
 }
 
 std::string EngineOpenCL::info() const {
+    auto device_list = get_device_list();
+    auto choosen_device = device_list.at(device_number);
+    device_list.erase(device_list.begin()+device_number);
     stringstream ss;
     ss << std::boolalpha; // Printing true/false instead of 1/0
     ss << "----" << "\n";
     ss << "OpenCL:" << "\n";
-    ss << "  Platform no:    ";
-    if (platform_no == -1) ss << "auto"; else ss << platform_no;
-    ss << "\n";
-    ss << "  Platform:       " << platform.getInfo<CL_PLATFORM_NAME>() << "\n";
-    ss << "  Device type:    " << default_device_type << "\n";
-    ss << "  Device:         " << device.getInfo<CL_DEVICE_NAME>() << " (" \
- << device.getInfo<CL_DEVICE_OPENCL_C_VERSION>() << ")\n";
+    ss << "  Device[" << device_number <<"]: " << choosen_device << "\n";
+    if (not device_list.empty()) {
+        ss << "  Available devices: \n" << choosen_device;
+    }
     ss << "  Memory:         " << device.getInfo<CL_DEVICE_GLOBAL_MEM_SIZE>() / 1024 / 1024 << " MB\n";
     ss << "  Malloc cache limit: " << malloc_cache_limit_in_bytes / 1024 / 1024
        << " MB (" << malloc_cache_limit_in_percent << "%)\n";
