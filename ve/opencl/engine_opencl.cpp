@@ -506,14 +506,13 @@ void EngineOpenCL::loopHeadWriter(const jitk::SymbolTable &symbols,
 std::string EngineOpenCL::info() const {
     auto device_list = get_device_list();
     auto choosen_device = device_list.at(device_number);
-    device_list.erase(device_list.begin()+device_number);
     stringstream ss;
     ss << std::boolalpha; // Printing true/false instead of 1/0
     ss << "----" << "\n";
     ss << "OpenCL:" << "\n";
     ss << "  Device[" << device_number <<"]: " << choosen_device << "\n";
-    if (not device_list.empty()) {
-        ss << "  Available devices: \n" << choosen_device;
+    if (device_list.size() > 1) {
+        ss << "  Available devices: \n" << device_list;
     }
     ss << "  Memory:         " << device.getInfo<CL_DEVICE_GLOBAL_MEM_SIZE>() / 1024 / 1024 << " MB\n";
     ss << "  Malloc cache limit: " << malloc_cache_limit_in_bytes / 1024 / 1024
